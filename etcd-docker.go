@@ -15,33 +15,31 @@ func inspectAndSet(c chan string, etcdClient *etcd.Client, dockerClient *docker.
 		container, err := dockerClient.InspectContainer(id)
 		if err != nil {
 			log.Fatal(err)
-		}
+		} else {
 
-		config := container.Config
-		network := container.NetworkSettings
-		portSpecs := config.PortSpecs
+			var addr string
 
-		var addr string
+			//if the container config contains ports then set the IP as the host IP
+			if len(container.Config.PortSpecs) > 0 {
+				addrs, err := net.InterfaceAddrs()
+				if err != nil {
+					log.Fatal("Oops: " + err.Error() + "\n")
+				} else {
 
-		//if the container config contains ports then set the IP as the host IP
-		if len(portSpecs) > 0 {
-			addrs, err := net.InterfaceAddrs()
-			if err != nil {
-				log.Fatal("Oops: " + err.Error() + "\n")
-			} else {
-
-				for _, a := range addrs {
-					if ipnet, ok := a.(*net.IPNet); ok && ipnet.IP.IsGlobalUnicast() {
-						addr = ipnet.IP.String()
+					for _, a := range addrs {
+						if ipnet, ok := a.(*net.IPNet); ok && ipnet.IP.IsGlobalUnicast() {
+							addr = ipnet.IP.String()
+						}
 					}
 				}
+			} else {
+				addr = container.NetworkSettings.IPAddress
 			}
-		} else {
-			addr = network.IPAddress
-		}
 
-		etcdClient.TestAndSet(*keyname+"/"+config.Hostname, addr, network.IPAddress, *ttl)
-		log.Print(id)
+			etcdClient.TestAndSet(*keyname+"/"+container.Config.Hostname, addr, addr, *ttl)
+			log.Print(id)
+
+		}
 
 	}
 }
