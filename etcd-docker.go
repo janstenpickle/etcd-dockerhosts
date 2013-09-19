@@ -1,13 +1,69 @@
 package main
 
 import (
+	"flag"
 	"github.com/coreos/go-etcd/etcd"
 	"github.com/fsouza/go-dockerclient"
 	"log"
-	"flag"
+	"net"
 	"time"
 )
 
+func inspectAndSet(c chan string, etcdClient *etcd.Client, dockerClient *docker.Client, keyname *string, ttl *uint64) {
+	for {
+		id := <-c
+		container, err := dockerClient.InspectContainer(id)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		config := container.Config
+		network := container.NetworkSettings
+		portSpecs := config.PortSpecs
+
+		var addr string
+
+		//if the container config contains ports then set the IP as the host IP
+		if len(portSpecs) > 0 {
+			addrs, err := net.InterfaceAddrs()
+			if err != nil {
+				log.Fatal("Oops: " + err.Error() + "\n")
+			} else {
+
+				for _, a := range addrs {
+					if ipnet, ok := a.(*net.IPNet); ok && ipnet.IP.IsGlobalUnicast() {
+						addr = ipnet.IP.String()
+					}
+				}
+			}
+		} else {
+			addr = network.IPAddress
+		}
+
+		etcdClient.TestAndSet(*keyname+"/"+config.Hostname, addr, network.IPAddress, *ttl)
+		log.Print(id)
+
+	}
+}
+
+func loop(c chan string, dockerClient *docker.Client, interval *time.Duration) {
+	opts := docker.ListContainersOptions{All: false}
+
+	for {
+		containers, err := dockerClient.ListContainers(opts)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		for _, container := range containers {
+			id := container.ID
+			c <- id
+		}
+
+		time.Sleep(time.Second * *interval)
+	}
+
+}
 
 func main() {
 	keyname := flag.String("keyname", "hosts", "Etcd keyname under which to record containers' hostnames/IP")
@@ -16,40 +72,25 @@ func main() {
 	interval := flag.Duration("interval", 10, "Docker API to Etcd sync interval")
 	etcdHost := flag.String("etcd_host", "127.0.0.1", "Etcd host")
 	etcdPort := flag.String("etcd_port", "4001", "Etcd port")
+	concurrency := flag.Int("concurrency", 5, "Number of worker threads")
 
 	flag.Parse()
-	
-	etcdCluster := []string{"http://"+*etcdHost+":"+*etcdPort}
-	etcdClient := etcd.NewClient()	
+
+	etcdCluster := []string{"http://" + *etcdHost + ":" + *etcdPort}
+	etcdClient := etcd.NewClient()
 	etcdClient.SetCluster(etcdCluster)
-	
-	client, err := docker.NewClient("http://127.0.0.1:"+*dockerAPIPort)
+
+	dockerClient, err := docker.NewClient("http://127.0.0.1:" + *dockerAPIPort)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	opts := docker.ListContainersOptions{All: false}
+	var c = make(chan string, *concurrency)
 
-	for true {
-		containers, err := client.ListContainers(opts)
-		if err != nil {
-			log.Fatal(err)
-		}
-	
-		for _, container := range containers {
-			id:= container.ID
-			container, err := client.InspectContainer(id)
-			if err != nil {
-				log.Fatal(err)
-			}
-			
-			config := container.Config
-			network := container.NetworkSettings
-			
-			etcdClient.TestAndSet(*keyname + "/" + config.Hostname, network.IPAddress, network.IPAddress, *ttl)
-		}
-		time.Sleep(time.Second**interval)
+	for i := 0; i < *concurrency; i++ {
+		go inspectAndSet(c, etcdClient, dockerClient, keyname, ttl)
 	}
+
+	loop(c, dockerClient, interval)
+
 }
-
-
